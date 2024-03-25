@@ -68,6 +68,8 @@ class AstroSerial(Node):
         self.odom_th = 0
         self.odom_current_time = 0
         self.odom_last_time = 0
+        self.get_logger().info("Started astro_serial_node!")
+
     
     def sendVelocity(self, linearX, angularZ):
         w_l = (linearX / self.wheelRadius) - ((angularZ * self.wheelSeparation) / (2 * self.wheelRadius))
