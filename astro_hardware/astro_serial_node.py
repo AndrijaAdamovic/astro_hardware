@@ -8,8 +8,12 @@ from sensor_msgs.msg import JointState
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32
 from geometry_msgs.msg import Quaternion
+from geometry_msgs.msg import TransformStamped
 from std_srvs.srv import Empty
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from tf2_ros import TransformBroadcaster
+
+import time
 
 class AstroSerial(Node):
     def __init__(self):
@@ -46,6 +50,9 @@ class AstroSerial(Node):
             10
         )
 
+        self.serial = serial.Serial(port='/dev/ttyTHS1', baudrate=57600, timeout=0.5)
+
+
         self.reset_odom_srv = self.create_service(Empty, "reset_odometry", self.reset_odom_callback)
         
         period = 0.0001
@@ -56,12 +63,12 @@ class AstroSerial(Node):
         self.wheelSeparation = 0.304
         self.maxLinearSpeed = 0.75
         self.maxAngularSpeed = 5.1
-        self.serial = serial.Serial(port='/dev/ttyACM0', baudrate=57600, timeout=0.1)
-        #self.serial.xonxoff = 1
+        self.serial.xonxoff = 1
 
         self.js_msg = JointState()
         self.current_msg = Float32()
         self.odom_msg = Odometry()
+        self.odom_tf_broadcaster = TransformBroadcaster(self)
 
         self.odom_x = 0
         self.odom_y = 0
@@ -80,7 +87,7 @@ class AstroSerial(Node):
             w_r = 0
         command = f"v {w_l} {w_r}\n"
 
-        self.get_logger().info(f"Sending linear: {linearX} angular: {angularZ} w_l: {w_l} w_r: {w_r}")
+        # self.get_logger().info(f"Sending linear: {linearX} angular: {angularZ} w_l: {w_l} w_r: {w_r}")
         self.serial.write(bytes(command, 'utf-8'))
 
     def callback(self, msg):
@@ -89,9 +96,10 @@ class AstroSerial(Node):
         self.sendVelocity(linearX=linear_x, angularZ=angular_z)
 
 
-    def timer_callback(self):
-        if self.serial.in_waiting:
-            rawJointStates = self.serial.readline().decode(errors='ignore').strip(" \n")
+    def timer_callback(self):	
+        # if self.serial.in_waiting:
+        try:
+            rawJointStates = self.serial.read_until().decode().strip()
             # rawJointStates = "0 0 0 0 0 0 0"
             rawJointStates_list = [float(e) for e in rawJointStates.split()]
 
@@ -103,8 +111,12 @@ class AstroSerial(Node):
             self.js_msg.header.frame_id = "base_link"
 
             # print(rawJointStates_list)
+            # self.calculate_Odometry()
 
             self.current_msg.data = float(rawJointStates_list[-1])
+        except Exception as e:
+            self.get_logger().info(f"ERROR At timer_callback {e}")
+            pass
 
     def quaternion_from_euler(self, roll, pitch, yaw):
         cy = math.cos(yaw * 0.5)
@@ -122,7 +134,7 @@ class AstroSerial(Node):
 
         return q
 
-    def publish_Odometry(self):
+    def calculate_Odometry(self):
 
         self.odom_current_time = float(self.get_clock().now().nanoseconds / 1e9)
 
@@ -143,6 +155,22 @@ class AstroSerial(Node):
         self.odom_th += deltaTh
         quat = self.quaternion_from_euler(0, 0, self.odom_th)
 
+        odom_trans = TransformStamped()
+        odom_trans.header.stamp = self.get_clock().now().to_msg()
+        odom_trans.header.frame_id = "odom"
+        odom_trans.child_frame_id = "base_footprint"
+
+        odom_trans.transform.translation.x = self.odom_x
+        odom_trans.transform.translation.y = self.odom_y
+        odom_trans.transform.translation.z = 0.0
+        
+        odom_trans.transform.rotation.x = quat[1] 
+        odom_trans.transform.rotation.y = quat[2] 
+        odom_trans.transform.rotation.z = quat[3] 
+        odom_trans.transform.rotation.w = quat[0] 
+
+        self.odom_tf_broadcaster.sendTransform(odom_trans)
+
         self.odom_msg.header.stamp = self.get_clock().now().to_msg()
         self.odom_msg.header.frame_id = "odom"
         self.odom_msg.child_frame_id = "base_footprint"
@@ -151,23 +179,24 @@ class AstroSerial(Node):
         self.odom_msg.pose.pose.position.y = self.odom_y
         self.odom_msg.pose.pose.position.z = 0.0
 
-        self.odom_msg.pose.pose.orientation.x = quat[0]
-        self.odom_msg.pose.pose.orientation.y = quat[1]
-        self.odom_msg.pose.pose.orientation.z = quat[2]
-        self.odom_msg.pose.pose.orientation.w = quat[3]
+        self.odom_msg.pose.pose.orientation.x = quat[1]
+        self.odom_msg.pose.pose.orientation.y = quat[2]
+        self.odom_msg.pose.pose.orientation.z = quat[3]
+        self.odom_msg.pose.pose.orientation.w = quat[0]
 
         self.odom_msg.twist.twist.linear.x = velX
         self.odom_msg.twist.twist.angular.z = velTh
 
         self.odom_last_time = self.odom_current_time
-
         self.odom_publiher.publish(self.odom_msg)
+
     
     def reset_odom_callback(self, request, response):
         self.get_logger().info('Incoming request: reset_odometry')
         self.odom_x = 0
         self.odom_y = 0
         self.odom_th = 0
+        self.calculate_Odometry()
         self.get_logger().info('Odometry was reseted.')
         return response
 
@@ -175,9 +204,8 @@ class AstroSerial(Node):
     def publish_All(self):
         self.js_publisher.publish(self.js_msg) 
         self.current_publisher.publish(self.current_msg)
-        self.publish_Odometry()
-
-
+        self.calculate_Odometry()
+        print(self.js_msg)
 
 
 def main(args=None):

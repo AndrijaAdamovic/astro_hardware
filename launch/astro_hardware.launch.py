@@ -58,5 +58,5 @@ def generate_launch_description():
         astro_hardware_node,
         joy_launch,
         lidar_launch,
-        realsense_launch
+        # realsense_launch
     ])
